@@ -15,104 +15,40 @@ const Notification = require('./models/notification');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Configure CORS
+// CORS configuration
 const corsOptions = {
-    origin: 'http://localhost:5173',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true
+  origin: 'http://localhost:5173',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 };
-
 app.use(cors(corsOptions));
 
-// Make sure to add express.json() middleware to parse JSON request bodies
+// Parse JSON bodies
 app.use(express.json());
 
-// Add request logging middleware
+// Request logger
 app.use((req, res, next) => {
-    console.log('\n=== Incoming Request ===');
-    console.log('Method:', req.method);
-    console.log('Path:', req.path);
-    console.log('URL:', req.url);
-    console.log('Base URL:', req.baseUrl);
-    console.log('Original URL:', req.originalUrl);
-    console.log('Headers:', req.headers);
-    console.log('Query:', req.query);
-    console.log('Params:', req.params);
-    next();
+  console.log('\n=== Incoming Request ===');
+  console.log('Method:', req.method);
+  console.log('Path:', req.path);
+  console.log('URL:', req.url);
+  console.log('Original URL:', req.originalUrl);
+  console.log('Query:', req.query);
+  console.log('Params:', req.params);
+  next();
 });
 
-// Add route logging middleware
-app.use((req, res, next) => {
-    console.log('\n=== Route Registration Check ===');
-    console.log('Available routes:');
-    app._router.stack.forEach((r) => {
-        if (r.route && r.route.path) {
-            console.log(`${Object.keys(r.route.methods)} ${r.route.path}`);
-        }
-    });
-    next();
-});
-
-// Register routes
-console.log('\n=== Registering Routes ===');
-app.use('/api/posts', postRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/notifications', notificationRoutes);
-console.log('Routes registered successfully');
-
-// Add error handling middleware
-app.use((err, req, res, next) => {
-    console.error('Error:', err);
-    res.status(err.status || 500).json({
-        message: err.message || 'Internal server error',
-        error: process.env.NODE_ENV === 'development' ? err : {}
-    });
-});
-
-// Add 404 handler - MUST be after all routes
-app.use((req, res) => {
-    console.log('404 Not Found:', req.originalUrl);
-    res.status(404).json({
-        message: 'Route not found',
-        path: req.originalUrl
-    });
-});
-
-// MongoDB connection URI
+// MongoDB connection
 const uri = process.env.MONGODB_URI;
-
-// Add connection state checking
-const checkConnection = () => {
-  if (mongoose.connection.readyState !== 1) {
-    console.error('Database connection not established. Current state:', mongoose.connection.readyState);
-    return false;
-  }
-  return true;
-};
-
-// Connect to MongoDB using Mongoose
 mongoose.connect(uri)
-  .then(() => {
+  .then(async () => {
     console.log('Connected to MongoDB successfully');
-    console.log('MongoDB URI:', uri);
     console.log('Using database:', mongoose.connection.db.databaseName);
-    console.log('Connection state:', mongoose.connection.readyState);
 
-    // Add connection error handler
-    mongoose.connection.on('error', (err) => {
-      console.error('MongoDB connection error:', err);
-    });
-
-    // Add disconnection handler
-    mongoose.connection.on('disconnected', () => {
-      console.error('MongoDB disconnected');
-    });
-
-    // Add reconnection handler
-    mongoose.connection.on('reconnected', () => {
-      console.log('MongoDB reconnected');
-    });
+    mongoose.connection.on('error', err => console.error('MongoDB connection error:', err));
+    mongoose.connection.on('disconnected', () => console.error('MongoDB disconnected'));
+    mongoose.connection.on('reconnected', () => console.log('MongoDB reconnected'));
 
     // Initialize schools collection
     const schools = [
@@ -161,69 +97,78 @@ mongoose.connect(uri)
     ];
 
     // Clear existing schools and insert new ones
-    mongoose.connection.db.collection('schools').deleteMany({})
-      .then(() => {
-        console.log('Cleared existing schools');
-        return mongoose.connection.db.collection('schools').insertMany(schools);
-      })
-      .then(() => {
+    try {
+      await mongoose.connection.db.collection('schools').deleteMany({});
+      console.log('Cleared existing schools');
+      
+      if (schools.length > 0) {
+        await mongoose.connection.db.collection('schools').insertMany(schools);
         console.log('Successfully initialized schools collection');
-      })
-      .catch(error => {
-        console.error('Error initializing schools:', error);
-      });
+      } else {
+        console.log('No schools to initialize');
+      }
+    } catch (error) {
+      console.error('Error initializing schools:', error);
+      // Don't throw the error, just log it and continue
+    }
   })
-  .catch((error) => {
-    console.error('MongoDB connection error:', error);
+  .catch(err => {
+    console.error('MongoDB connection error:', err?.stack || err?.message || err);
+    process.exit(1);
   });
 
-// Import the User model
-const User = require('./models/User');
+// Register routes
+app.use('/api/users', userRoutes);
+app.use('/api/posts', postRoutes);
+app.use('/api/notifications', notificationRoutes);
 
-// Initialize Firebase Admin
+// Global error handler
+app.use((err, req, res, next) => {
+  // Safely log the error
+  console.error(err?.stack || err?.message || err);
+
+  const status = err?.status || 500;
+  const message = err instanceof Error ? err.message : String(err || 'Internal server error');
+
+  res.status(status).json({
+    message: 'Internal server error',
+    error: {
+      name:    err?.name    || 'UnknownError',
+      message: message,
+      stack:   err?.stack   || 'No stack trace'
+    }
+  });
+});
+
+// 404 handler (after all routes)
+app.use((req, res) => {
+  console.log('404 Not Found:', req.originalUrl);
+  res.status(404).json({ message: 'Route not found', path: req.originalUrl });
+});
+
+// Firebase Admin init
 const serviceAccount = require('./serviceAccountKey.json');
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
-
-// Add Firebase Admin initialization check
-console.log('\n=== Firebase Admin Initialization ===');
+admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 console.log('Firebase Admin initialized:', admin.apps.length > 0);
-console.log('Service account loaded:', !!serviceAccount);
 
-// Test endpoint
-app.get('/api/test', (req, res) => {
-  res.json({ message: 'Server is working!' });
-});
-
-// Test notification endpoint
-app.post('/api/test-notification', auth, (req, res) => {
-    const testNotification = new Notification({
-        recipient: req.user.uid,
-        sender: 'test-sender',
-        type: 'upvote',
-        postId: new mongoose.Types.ObjectId(req.body.postId),
-        read: false
+// Test endpoints\app.get('/api/test', (req, res) => res.json({ message: 'Server is working!' }));
+app.post('/api/test-notification', auth, async (req, res) => {
+  try {
+    const notif = new Notification({
+      recipient: req.user.uid,
+      sender: 'test-sender',
+      type: 'upvote',
+      postId: new mongoose.Types.ObjectId(req.body.postId),
+      read: false
     });
-
-    testNotification.save()
-        .then(savedNotification => {
-            console.log('Test notification saved:', savedNotification);
-            return Notification.find({ recipient: req.user.uid });
-        })
-        .then(allNotifications => {
-            res.json({
-                message: 'Test notification created and verified',
-                notifications: allNotifications
-            });
-        })
-        .catch(error => {
-            console.error('Error in test notification:', error);
-            res.status(500).json({ message: error.message });
-        });
+    await notif.save();
+    const allNotifs = await Notification.find({ recipient: req.user.uid });
+    res.json({ message: 'Notification saved', notifications: allNotifs });
+  } catch (err) {
+    console.error('Error in test notification:', err?.stack || err?.message || err);
+    res.status(500).json({ message: err?.message || 'Internal server error' });
+  }
 });
 
-// Start the Express server
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+// Start server
+app.listen(port, () => console.log(`Server running on port ${port}`));
