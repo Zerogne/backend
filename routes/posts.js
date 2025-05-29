@@ -2,17 +2,41 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const auth = require('../middleware/auth'); // Import auth middleware
+const Post = require('../models/post'); // Import Post model
+
+console.log('\n=== Registering Post Routes ===');
+
+// Add connection check middleware
+const checkDbConnection = (req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    console.error('Database connection not established. Current state:', mongoose.connection.readyState);
+    return res.status(500).json({ message: 'Database connection not established' });
+  }
+  next();
+};
+
+// Apply the middleware to all routes
+router.use(checkDbConnection);
+
+// Add route logging middleware
+router.use((req, res, next) => {
+    console.log('\n=== Post Route Request ===');
+    console.log('Method:', req.method);
+    console.log('Path:', req.path);
+    console.log('Original URL:', req.originalUrl);
+    console.log('Params:', req.params);
+    next();
+});
 
 // Define route handlers
 const getAllPosts = async (req, res) => {
     try {
-        const posts = await mongoose.connection.db.collection('posts').find({}).toArray();
+        const posts = await Post.find({});
         res.json(posts);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 };
-
 
 const getPostById = async (req, res) => {
     try {
@@ -20,25 +44,13 @@ const getPostById = async (req, res) => {
         console.log('\n=== GET /api/posts/:id ===');
         console.log('Fetching post with ID:', postId);
 
-        // Validate MongoDB connection
-        if (!mongoose.connection.readyState) {
-            console.error('MongoDB not connected');
-            return res.status(500).json({ message: 'Database connection not established' });
-        }
-
+        // Try to find post by ID or Firebase UID
         let post;
-        try {
-            // Try to convert the ID to ObjectId
-            const postIdObj = new mongoose.Types.ObjectId(postId);
-            post = await mongoose.connection.db.collection('posts').findOne(
-                { _id: postIdObj }
-            );
-        } catch (error) {
-            console.log('Invalid ObjectId format:', error);
-            return res.status(400).json({ 
-                message: 'Invalid post ID format',
-                error: error.message
-            });
+        if (mongoose.Types.ObjectId.isValid(postId)) {
+            post = await Post.findById(postId);
+        } else {
+            // If not a valid ObjectId, try to find by userId
+            post = await Post.findOne({ userId: postId });
         }
 
         if (!post) {
@@ -48,12 +60,11 @@ const getPostById = async (req, res) => {
 
         console.log('Found post:', JSON.stringify(post, null, 2));
         res.json(post);
-
     } catch (error) {
         console.error('Error fetching post:', error);
         res.status(500).json({ 
             message: 'Failed to fetch post',
-            error: error.message
+            error: error.message 
         });
     }
 };
@@ -66,18 +77,16 @@ const createPost = async (req, res) => {
             title: String(req.body.title || ''),
             feedback: String(req.body.feedback || ''),
             rating: Number(req.body.rating || 0),
-            postAnonymously: Boolean(req.body.postAnonymously),
-            upvotes: 0,
-            comments: [],
-            createdAt: new Date(),
-            updatedAt: new Date()
+            postAnonymously: Boolean(req.body.postAnonymously)
         };
 
-        const result = await mongoose.connection.db.collection('posts').insertOne(postData);
+        const post = new Post(postData);
+        const savedPost = await post.save();
+        
         res.status(201).json({ 
             message: 'Post created successfully', 
-            postId: result.insertedId,
-            post: postData
+            postId: savedPost._id,
+            post: savedPost
         });
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -89,14 +98,8 @@ const updatePost = async (req, res) => {
         const postId = req.params.id;
         const updateData = req.body;
         
-        // Ensure the user is the author or an admin if needed for general edits
-        // For upvotes/comments, we might allow any logged-in user, but the update logic handles userId
-
         if (updateData.type === 'upvote') {
-            const post = await mongoose.connection.db.collection('posts').findOne(
-                { _id: new mongoose.Types.ObjectId(postId) }
-            );
-            
+            const post = await Post.findById(postId);
             if (!post) {
                 return res.status(404).json({ message: 'Post not found' });
             }
@@ -113,36 +116,23 @@ const updatePost = async (req, res) => {
                 newUpvotedBy = [...(post.upvotedBy || []), updateData.userId];
             }
 
-            await mongoose.connection.db.collection('posts').updateOne(
-                { _id: new mongoose.Types.ObjectId(postId) },
+            const updatedPost = await Post.findByIdAndUpdate(
+                postId,
                 { 
-                    $set: {
-                        upvotes: newUpvotes,
-                        upvotedBy: newUpvotedBy
-                    }
-                }
-            );
-
-            // Fetch the updated post to return in the response
-            const updatedPost = await mongoose.connection.db.collection('posts').findOne(
-                 { _id: new mongoose.Types.ObjectId(postId) }
+                    upvotes: newUpvotes,
+                    upvotedBy: newUpvotedBy
+                },
+                { new: true }
             );
 
             res.json({
                 message: hasUpvoted ? 'Upvote removed' : 'Post upvoted successfully',
                 upvotes: updatedPost.upvotes,
                 hasUpvoted: !hasUpvoted,
-                upvotedBy: updatedPost.upvotedBy // Return updated list
+                upvotedBy: updatedPost.upvotedBy
             });
 
         } else if (updateData.type === 'comment') {
-            console.log('Received comment data:', updateData);
-            
-            if (!updateData.text) {
-                console.error('Comment text is missing:', updateData);
-                return res.status(400).json({ message: 'Comment text is required' });
-            }
-
             const comment = {
                 id: new mongoose.Types.ObjectId(),
                 userId: updateData.userId,
@@ -150,56 +140,38 @@ const updatePost = async (req, res) => {
                 createdAt: new Date()
             };
 
-            console.log('Creating comment with data:', comment);
-
-            await mongoose.connection.db.collection('posts').updateOne(
-                { _id: new mongoose.Types.ObjectId(postId) },
-                { $push: { comments: comment } }
+            const updatedPost = await Post.findByIdAndUpdate(
+                postId,
+                { $push: { comments: comment } },
+                { new: true }
             );
-
-            // Fetch the updated post to return in the response
-            const updatedPost = await mongoose.connection.db.collection('posts').findOne(
-                { _id: new mongoose.Types.ObjectId(postId) }
-            );
-
-            console.log('Updated post with new comment:', updatedPost);
 
             res.json({ 
                 message: 'Comment added successfully', 
                 comment: updatedPost.comments.slice(-1)[0] 
             });
 
-        } else { // Handle general post update (from edit modal)
-             // Add a check to ensure the user is the author before allowing the edit
-            const post = await mongoose.connection.db.collection('posts').findOne(
-                 { _id: new mongoose.Types.ObjectId(postId) }
-            );
-
+        } else {
+            const post = await Post.findById(postId);
             if (!post) {
-                 return res.status(404).json({ message: 'Post not found' });
+                return res.status(404).json({ message: 'Post not found' });
             }
-            // Assuming req.user is populated by the auth middleware
+
             if (!req.user || post.userId !== req.user.uid) {
-                 return res.status(403).json({ message: 'Unauthorized to edit this post' });
+                return res.status(403).json({ message: 'Unauthorized to edit this post' });
             }
 
-            await mongoose.connection.db.collection('posts').updateOne(
-                { _id: new mongoose.Types.ObjectId(postId) },
+            const updatedPost = await Post.findByIdAndUpdate(
+                postId,
                 {
-                    $set: {
-                        schoolName: String(updateData.schoolName),
-                        title: String(updateData.title),
-                        feedback: String(updateData.feedback),
-                        rating: Number(updateData.rating),
-                        postAnonymously: Boolean(updateData.postAnonymously),
-                        updatedAt: new Date()
-                    }
-                }
-            );
-
-            // Fetch the updated post to return in the response
-             const updatedPost = await mongoose.connection.db.collection('posts').findOne(
-                 { _id: new mongoose.Types.ObjectId(postId) }
+                    schoolName: String(updateData.schoolName),
+                    title: String(updateData.title),
+                    feedback: String(updateData.feedback),
+                    rating: Number(updateData.rating),
+                    postAnonymously: Boolean(updateData.postAnonymously),
+                    updatedAt: new Date()
+                },
+                { new: true }
             );
 
             res.json({ message: 'Post updated successfully', post: updatedPost });
@@ -210,31 +182,20 @@ const updatePost = async (req, res) => {
     }
 };
 
-// Delete a post
 const deletePost = async (req, res) => {
     try {
         const postId = req.params.id;
+        const post = await Post.findById(postId);
 
-        // Add a check to ensure the user is the author before allowing deletion
-         const post = await mongoose.connection.db.collection('posts').findOne(
-             { _id: new mongoose.Types.ObjectId(postId) }
-         );
-
-         if (!post) {
-             return res.status(404).json({ message: 'Post not found' });
-         }
-         // Assuming req.user is populated by the auth middleware
-         if (!req.user || post.userId !== req.user.uid) {
-             return res.status(403).json({ message: 'Unauthorized to delete this post' });
-         }
-
-        const result = await mongoose.connection.db.collection('posts').deleteOne({ _id: new mongoose.Types.ObjectId(postId) });
-
-        if (result.deletedCount === 0) {
-             // This case should ideally be caught by the post existence check above
+        if (!post) {
             return res.status(404).json({ message: 'Post not found' });
         }
 
+        if (!req.user || post.userId !== req.user.uid) {
+            return res.status(403).json({ message: 'Unauthorized to delete this post' });
+        }
+
+        await Post.findByIdAndDelete(postId);
         res.json({ message: 'Post deleted successfully' });
     } catch (error) {
         console.error('Error deleting post:', error);
@@ -251,13 +212,13 @@ const searchPosts = async (req, res) => {
         }
 
         const searchRegex = new RegExp(query, 'i');
-        const posts = await mongoose.connection.db.collection('posts').find({
+        const posts = await Post.find({
             $or: [
                 { title: searchRegex },
                 { schoolName: searchRegex },
                 { feedback: searchRegex }
             ]
-        }).toArray();
+        });
 
         res.json(posts);
     } catch (error) {
@@ -266,12 +227,111 @@ const searchPosts = async (req, res) => {
     }
 };
 
-// Register routes with auth middleware where needed
+const filterPostsBySchoolType = async (req, res) => {
+    try {
+        const { schoolType } = req.query;
+        console.log('\n=== Filter Posts By School Type ===');
+        console.log('School Type:', schoolType);
+        
+        if (!schoolType) {
+            console.log('Error: School type is missing');
+            return res.status(400).json({ message: 'School type is required' });
+        }
+
+        let query = {};
+        if (schoolType !== 'All Schools') {
+            const schools = await mongoose.connection.db.collection('schools')
+                .find({ type: schoolType })
+                .toArray();
+            
+            if (schools.length === 0) {
+                console.log(`No schools found for type: ${schoolType}`);
+                return res.json([]);
+            }
+
+            const schoolNames = schools.map(school => school.name);
+            query = { schoolName: { $in: schoolNames } };
+        }
+
+        const posts = await Post.find(query);
+        console.log('Found posts:', posts.length);
+        res.json(posts);
+    } catch (error) {
+        console.error('Error in filterPostsBySchoolType:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+const getAllSchools = async (req, res) => {
+    try {
+        console.log('\n=== GET /api/posts/schools ===');
+        
+        const schools = await mongoose.connection.db.collection('schools').find({}).toArray();
+        console.log('Found schools:', schools.length);
+        
+        if (!schools || schools.length === 0) {
+            console.log('No schools found in database');
+            return res.json([]);
+        }
+
+        res.json(schools);
+    } catch (error) {
+        console.error('Error fetching schools:', error);
+        res.status(500).json({ 
+            message: 'Failed to fetch schools',
+            error: error.message 
+        });
+    }
+};
+
+const getUserPosts = async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        console.log('\n=== GET /api/posts/user/:userId ===');
+        console.log('Fetching posts for user:', userId);
+
+        const posts = await Post.find({ 
+            userId: userId,
+            postAnonymously: false 
+        }).sort({ createdAt: -1 });
+
+        console.log('Found posts:', posts.length);
+        res.json(posts);
+    } catch (error) {
+        console.error('Error fetching user posts:', error);
+        res.status(500).json({ 
+            message: 'Failed to fetch user posts',
+            error: error.message 
+        });
+    }
+};
+
+// Register routes in order of specificity (most specific first)
+// Test route
+router.get('/test', (req, res) => {
+    console.log('Test route hit');
+    res.json({ message: 'Test route working' });
+});
+
+// User posts route
+router.get('/user/:userId', auth, getUserPosts);
+
+// Search route
 router.get('/search', searchPosts);
+
+// Filter by school type route
+router.get('/filter', filterPostsBySchoolType);
+
+// Schools route
+router.get('/schools', getAllSchools);
+
+// Generic routes (least specific last)
+router.get('/', getAllPosts);
 router.get('/:id', getPostById);
-router.get('/', getAllPosts); // GET /api/posts is public
-router.post('/', auth, createPost); // POST /api/posts requires auth
-router.put('/:id', auth, updatePost); // PUT /api/posts/:id requires auth
-router.delete('/:id', auth, deletePost); // DELETE /api/posts/:id requires auth
+router.post('/', auth, createPost);
+router.put('/:id', auth, updatePost);
+router.delete('/:id', auth, deletePost);
+
+console.log('Post routes registered successfully');
 
 module.exports = router; 
